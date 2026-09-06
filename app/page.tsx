@@ -1,11 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+import React, { useState, useEffect } from 'react';
 
 export default function Dashboard() {
   // Authentication & User State
@@ -27,124 +22,58 @@ export default function Dashboard() {
   const [showCelebration, setShowCelebration] = useState(false);
   const [celebrationMsg, setCelebrationMsg] = useState('');
 
-  // 1. Initialize Session & Retrieve Data on Mount
+  // 1. Simple Gatekeeper (No Google OAuth required)
   useEffect(() => {
-    const initializeSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      // Capture the token from a fresh login, or grab it from memory if the page was refreshed
-      const token = session?.provider_token || sessionStorage.getItem('googleDriveToken');
-      
-      if (token) {
-        sessionStorage.setItem('googleDriveToken', token);
-        setIsAuth(true);
-      }
-
-      const savedName = localStorage.getItem('vaultNickname');
-      if (savedName) setNickname(savedName);
-    };
-    
-    initializeSession();
+    const savedName = localStorage.getItem('vaultNickname');
+    if (savedName) {
+      setNickname(savedName);
+      setIsAuth(true);
+    }
   }, []);
 
-  // 2. Login Flow
-  const handleLogin = async () => {
+  // 2. Login Flow (Saves name and unlocks dashboard)
+  const handleLogin = () => {
     if (!nickname.trim()) {
       alert('Please enter a nickname first!');
       return;
     }
     
     localStorage.setItem('vaultNickname', nickname);
-    
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        scopes: 'https://www.googleapis.com/auth/drive',
-        redirectTo: `${window.location.origin}/dashboard`,
-      },
-    });
-
-    if (error) console.error('Auth Error:', error.message);
+    setIsAuth(true);
   };
 
-  // 3. Reusable Drive Upload Function (Used for both Video and Thumbnail)
-  const uploadToDrive = async (file: File, finalName: string, token: string) => {
-    const metadata = {
-      name: finalName,
-      parents: ['1CFgz4R75u7eq6k9dn9abeRYLfKkWlJ3W'], 
-    };
-
-    const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'X-Upload-Content-Length': file.size.toString(),
-        'X-Upload-Content-Type': file.type || 'application/octet-stream',
-      },
-      body: JSON.stringify(metadata),
-    });
-
-    if (!initRes.ok) throw new Error(`Failed to open pipeline for ${file.name}`);
-    const uploadUrl = initRes.headers.get('Location');
-    if (!uploadUrl) throw new Error('No upload URL returned.');
-
-    const chunkSize = 1024 * 1024; // 1 MB chunks
-    let start = 0;
-    const startTime = Date.now();
-
-    while (start < file.size) {
-      const end = Math.min(start + chunkSize, file.size);
-      const chunk = file.slice(start, end);
-
-      const uploadRes = await fetch(uploadUrl, {
-        method: 'PUT',
-        headers: { 'Content-Range': `bytes ${start}-${end - 1}/${file.size}` },
-        body: chunk,
-      });
-
-      if (!uploadRes.ok && uploadRes.status !== 308) {
-        throw new Error(`Upload failed at chunk ${start}-${end}`);
-      }
-
-      start = end;
-      
-      // Calculate speed and progress
-      const currentProgress = Math.round((start / file.size) * 100);
-      const elapsedSeconds = (Date.now() - startTime) / 1000;
-      const currentSpeed = elapsedSeconds > 0 ? ((start / (1024 * 1024)) / elapsedSeconds).toFixed(2) : '0.00';
-      
-      setProgress(currentProgress > 100 ? 100 : currentProgress);
-      setSpeed(currentSpeed);
-    }
-  };
-
-  // 4. Main Upload Handler
+  // 3. Main Upload Handler (Now points to our backend API)
   const executeUpload = async () => {
     if (!videoFile) return;
-    const token = sessionStorage.getItem('googleDriveToken');
-    if (!token) {
-      alert('Your Google session expired. Please refresh and log in again.');
-      return;
-    }
 
     setUploading(true);
-    setProgress(0);
-    setSpeed('0.00');
+    setProgress(25); // Simulated progress while sending to server
+    setSpeed('Routing...');
+    setStatusText('Transmitting to secure backend...');
 
     try {
       const baseName = customName.trim() || videoFile.name.replace(/\.[^/.]+$/, "");
 
-      // Upload Thumbnail if selected
-      if (thumbnailFile) {
-        setStatusText('Uploading Thumbnail...');
-        const thumbExt = thumbnailFile.name.split('.').pop();
-        await uploadToDrive(thumbnailFile, `${baseName}-thumbnail.${thumbExt}`, token);
+      // Package the files to send to your Next.js server
+      const formData = new FormData();
+      formData.append('video', videoFile);
+      if (thumbnailFile) formData.append('thumbnail', thumbnailFile);
+      formData.append('baseName', baseName);
+      formData.append('nickname', nickname);
+
+      // Send to the backend route we are going to build next
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Backend upload failed');
       }
 
-      // Upload Video
-      setStatusText('Transmitting Video...');
-      await uploadToDrive(videoFile, `${baseName}.mp4`, token);
+      setProgress(100);
+      setStatusText('Transfer Complete!');
 
       // Trigger Celebration
       const messages = [
@@ -161,11 +90,12 @@ export default function Dashboard() {
       setVideoFile(null);
       setThumbnailFile(null);
       setCustomName('');
-      setStatusText('');
+      setTimeout(() => setStatusText(''), 2000);
       
     } catch (err: any) {
       console.error('Upload Error:', err);
       setStatusText(`❌ Failed: ${err.message}`);
+      setProgress(0);
     }
     setUploading(false);
   };
@@ -187,7 +117,7 @@ export default function Dashboard() {
             onClick={handleLogin}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded transition-colors"
           >
-            Connect Google Drive
+            Access Dashboard
           </button>
         </div>
       </div>
@@ -276,8 +206,8 @@ export default function Dashboard() {
               </div>
               
               <div className="flex justify-between text-gray-500">
-                <span>Speed: {speed} MB/s</span>
-                <span>Target: Google Drive</span>
+                <span>Status: {speed}</span>
+                <span>Target: Secure Backend</span>
               </div>
             </div>
           )}
